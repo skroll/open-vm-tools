@@ -545,6 +545,105 @@ HgfsUnpackCommonAttr(HgfsReq *req,            // IN: Reply packet
 /*
  *----------------------------------------------------------------------
  *
+ * HgfsCalcBlockSize --
+ *
+ *    Calculate the number of 512 byte blocks used.
+ *
+ *    Round the size to the next whole block and divide by the block size
+ *    to get the number of 512 byte blocks.
+ *    Note, this is taken from the nfs client and is simply performing:
+ *    (size + 512-1)/ 512)
+ *
+ * Results:
+ *    The number of 512 byte blocks for the size.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 17)
+static inline blkcnt_t
+HgfsCalcBlockSize(uint64 tsize)
+{
+   blkcnt_t used = (tsize + 511) >> 9;
+   return (used > ULONG_MAX) ? ULONG_MAX : used;
+}
+#else
+static inline unsigned long
+HgfsCalcBlockSize(uint64 tsize)
+{
+   loff_t used = (tsize + 511) >> 9;
+   return (used > ULONG_MAX) ? ULONG_MAX : used;
+}
+#endif
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsSetInodeUidGid --
+ *
+ *    Set the UID and GID of the inode.
+ *
+ *    Update an inode's UID and GID to match those of the HgfsAttr returned
+ *    by the server.
+ *
+ * Results:
+ *    The number of 512 byte blocks for the size.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static void
+HgfsSetInodeUidGid(struct inode *inode,          // IN/OUT: Inode
+                   HgfsSuperInfo *si,            // IN: New attrs
+                   HgfsAttrInfo const *attr)     // IN: New attrs
+{
+   /*
+    * Use the stored uid and gid if we were given them at mount-time, or if
+    * the server didn't give us a uid or gid.
+    */
+   if (si->uidSet || (attr->mask & HGFS_ATTR_VALID_USERID) == 0) {
+      inode->i_uid = si->uid;
+   } else {
+      kuid_t attrUid = make_kuid(&init_user_ns, attr->userId);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+      if (uid_valid(attrUid)) {
+         inode->i_uid = attrUid;
+      } else {
+         inode->i_uid = si->uid;
+      }
+#else
+      inode->i_uid = attrUid;
+#endif
+      LOG(6, (KERN_DEBUG "VMware hgfs: %s: inode uid %u\n",
+               __func__, from_kuid(&init_user_ns, inode->i_uid)));
+   }
+   if (si->gidSet || (attr->mask & HGFS_ATTR_VALID_GROUPID) == 0) {
+      inode->i_gid = si->gid;
+   } else {
+      kgid_t attrGid = make_kgid(&init_user_ns, attr->groupId);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
+      if (gid_valid(attrGid)) {
+         inode->i_gid = attrGid;
+      } else {
+         inode->i_gid = si->gid;
+      }
+#else
+      inode->i_gid = attrGid;
+#endif
+      LOG(6, (KERN_DEBUG "VMware hgfs: %s: inode gid %u\n",
+               __func__, from_kgid(&init_user_ns, inode->i_gid)));
+   }
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
  * HgfsChangeFileAttributes --
  *
  *    Update an inode's attributes to match those of the HgfsAttr. May
@@ -634,20 +733,7 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
     */
    set_nlink(inode, 1);
 
-   /*
-    * Use the stored uid and gid if we were given them at mount-time, or if
-    * the server didn't give us a uid or gid.
-    */
-   if (si->uidSet || (attr->mask & HGFS_ATTR_VALID_USERID) == 0) {
-      inode->i_uid = si->uid;
-   } else {
-      inode->i_uid = attr->userId;
-   }
-   if (si->gidSet || (attr->mask & HGFS_ATTR_VALID_GROUPID) == 0) {
-      inode->i_gid = si->gid;
-   } else {
-      inode->i_gid = attr->groupId;
-   }
+   HgfsSetInodeUidGid(inode, si, attr);
 
    inode->i_rdev = 0;  /* Device nodes are not supported */
 #if !defined VMW_INODE_2618
@@ -1618,8 +1704,8 @@ HgfsStatusConvertToLinux(HgfsStatus hgfsStatus) // IN: Status code to convert
 void
 HgfsSetUidGid(struct inode *parent,     // IN: parent inode
               struct dentry *dentry,    // IN: dentry of file to update
-              uid_t uid,                // IN: uid to set
-              gid_t gid)                // IN: gid to set
+              kuid_t uid,               // IN: uid to set
+              kgid_t gid)               // IN: gid to set
 {
    struct iattr setUidGid;
 
