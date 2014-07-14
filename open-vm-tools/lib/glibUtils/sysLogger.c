@@ -38,8 +38,30 @@ typedef struct SysLogger {
 
 
 static SysLogger *gSysLogger;
-static GStaticMutex gSysLoggerLock = G_STATIC_MUTEX_INIT;
 
+#if GLIB_CHECK_VERSION(2,32,0)
+static GMutex gSysLoggerLock;
+#else
+static GStaticMutex gSysLoggerLock = G_STATIC_MUTEX_INIT;
+#endif
+
+static inline void SysLoggerLock(void)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&gSysLoggerLock);
+#else
+   g_static_mutex_lock(&gSysLoggerLock);
+#endif
+}
+
+static inline void SysLoggerUnlock(void)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&gSysLoggerLock);
+#else
+   g_static_mutex_unlock(&gSysLoggerLock);
+#endif
+}
 
 /*
  *******************************************************************************
@@ -105,7 +127,7 @@ SysLoggerUnref(gpointer data)
 {
    g_return_if_fail(data == gSysLogger);
    g_return_if_fail(gSysLogger->refcount > 0);
-   g_static_mutex_lock(&gSysLoggerLock);
+   SysLoggerLock();
    gSysLogger->refcount -= 1;
    if (gSysLogger->refcount == 0) {
       closelog();
@@ -113,7 +135,8 @@ SysLoggerUnref(gpointer data)
       g_free(gSysLogger);
       gSysLogger = NULL;
    }
-   g_static_mutex_unlock(&gSysLoggerLock);
+
+   SysLoggerUnlock();
 }
 
 
@@ -140,7 +163,7 @@ GlibLogger *
 GlibUtils_CreateSysLogger(const char *domain,
                           const char *facility)
 {
-   g_static_mutex_lock(&gSysLoggerLock);
+   SysLoggerLock();
    if (gSysLogger == NULL) {
       int facid = LOG_USER;
 
@@ -203,7 +226,8 @@ GlibUtils_CreateSysLogger(const char *domain,
    } else {
       gSysLogger->refcount += 1;
    }
-   g_static_mutex_unlock(&gSysLoggerLock);
+
+   SysLoggerUnlock();
    return &gSysLogger->handler;
 }
 

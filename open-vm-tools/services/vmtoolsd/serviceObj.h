@@ -39,7 +39,11 @@
 
 typedef struct ToolsCoreService {
    GObject        parent;
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         lock;
+#else
    GMutex        *lock;
+#endif
    GArray        *props;
 } ToolsCoreService;
 

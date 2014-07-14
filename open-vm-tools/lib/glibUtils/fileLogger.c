@@ -44,9 +44,32 @@ typedef struct FileLogger {
    guint          maxFiles;
    gboolean       append;
    gboolean       error;
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         lock;
+#else
    GStaticMutex   lock;
+#endif
 } FileLogger;
 
+static inline void 
+FileLoggerLock(FileLogger *logger)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&logger->lock);
+#else
+   g_static_mutex_lock(&logger->lock);
+#endif
+}
+
+static inline void 
+FileLoggerUnlock(FileLogger *logger)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&logger->lock);
+#else
+   g_static_mutex_unlock(&logger->lock);
+#endif
+}
 
 #if !defined(_WIN32)
 /*
@@ -303,7 +326,7 @@ FileLoggerLog(const gchar *domain,
    FileLogger *logger = data;
    gsize written;
 
-   g_static_mutex_lock(&logger->lock);
+   FileLoggerLock(logger);
 
    if (logger->error) {
       goto exit;
@@ -342,7 +365,7 @@ FileLoggerLog(const gchar *domain,
    }
 
 exit:
-   g_static_mutex_unlock(&logger->lock);
+   FileLoggerUnlock(logger);
 }
 
 
@@ -364,7 +387,11 @@ FileLoggerDestroy(gpointer data)
    if (logger->file != NULL) {
       g_io_channel_unref(logger->file);
    }
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_clear(&logger->lock);
+#else
    g_static_mutex_free(&logger->lock);
+#endif
    g_free(logger->path);
    g_free(logger);
 }
@@ -411,7 +438,12 @@ GlibUtils_CreateFileLogger(const char *path,
    data->append = append;
    data->maxSize = maxSize * 1024 * 1024;
    data->maxFiles = maxFiles + 1; /* To account for the active log file. */
+
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&data->lock);
+#else
    g_static_mutex_init(&data->lock);
+#endif
 
    return &data->handler;
 }

@@ -27,9 +27,33 @@
 
 typedef struct VMXLoggerData {
    GlibLogger     handler;
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         lock;
+#else
    GStaticMutex   lock;
+#endif
    RpcChannel    *chan;
 } VMXLoggerData;
+
+static inline void
+VMXLoggerLock(VMXLoggerData *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&self->lock);
+#else
+   g_static_mutex_lock(&self->lock);
+#endif
+}
+
+static inline void
+VMXLoggerUnlock(VMXLoggerData *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&self->lock);
+#else
+   g_static_mutex_unlock(&self->lock);
+#endif
+}
 
 
 /*
@@ -60,7 +84,8 @@ VMXLoggerLog(const gchar *domain,
 {
    VMXLoggerData *logger = data;
 
-   g_static_mutex_lock(&logger->lock);
+   VMXLoggerLock(logger);
+
    if (RpcChannel_Start(logger->chan)) {
       gchar *msg;
       gint cnt = VMToolsAsprintf(&msg, "log %s", message);
@@ -75,7 +100,8 @@ VMXLoggerLog(const gchar *domain,
       g_free(msg);
       RpcChannel_Stop(logger->chan);
    }
-   g_static_mutex_unlock(&logger->lock);
+
+   VMXLoggerUnlock(logger);
 }
 
 
@@ -95,7 +121,12 @@ VMXLoggerDestroy(gpointer data)
 {
    VMXLoggerData *logger = data;
    RpcChannel_Destroy(logger->chan);
+
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_clear(&logger->lock);
+#else
    g_static_mutex_free(&logger->lock);
+#endif
    g_free(logger);
 }
 
@@ -119,7 +150,12 @@ VMToolsCreateVMXLogger(void)
    data->handler.addsTimestamp = TRUE;
    data->handler.shared = TRUE;
    data->handler.dtor = VMXLoggerDestroy;
+
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&data->lock);
+#else
    g_static_mutex_init(&data->lock);
+#endif
    data->chan = BackdoorChannel_New();
    return &data->handler;
 }

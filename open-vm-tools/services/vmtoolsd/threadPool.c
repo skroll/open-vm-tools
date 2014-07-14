@@ -40,7 +40,11 @@ typedef struct ThreadPoolState {
    GThreadPool   *pool;
    GQueue        *workQueue;
    GPtrArray     *threads;
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         lock;
+#else
    GMutex        *lock;
+#endif
    guint          nextWorkId;
 } ThreadPoolState;
 
@@ -65,6 +69,26 @@ typedef struct StandaloneTask {
 
 
 static ThreadPoolState gState;
+
+static inline void
+ThreadPoolStateLock(void)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&gState.lock);
+#else
+   g_mutex_lock(gState.lock);
+#endif
+}
+
+static inline void
+ThreadPoolStateUnlock(void)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&gState.lock);
+#else
+   g_mutex_unlock(gState.lock);
+#endif
+}
 
 
 /*
@@ -170,9 +194,9 @@ ToolsCorePoolDoWork(gpointer data)
     * In multi-threaded mode, the thread pool callback already did this.
     */
    if (gState.pool == NULL) {
-      g_mutex_lock(gState.lock);
+      ThreadPoolStateLock();
       g_queue_remove(gState.workQueue, work);
-      g_mutex_unlock(gState.lock);
+      ThreadPoolStateUnlock();
    }
 
    work->cb(gState.ctx, work->data);
@@ -223,7 +247,8 @@ ToolsCorePoolRunThread(gpointer data)
    task->cb(gState.ctx, task->data);
    task->active = FALSE;
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
+
    /* If not active, the shutdown function will clean things up. */
    if (gState.active) {
       g_ptr_array_remove(gState.threads, task);
@@ -232,7 +257,8 @@ ToolsCorePoolRunThread(gpointer data)
                       task,
                       ToolsCorePoolDestroyThread);
    }
-   g_mutex_unlock(gState.lock);
+
+   ThreadPoolStateUnlock();
 
    return NULL;
 }
@@ -257,9 +283,9 @@ ToolsCorePoolRunWorker(gpointer state,
 {
    WorkerTask *work;
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
    work = g_queue_pop_tail(gState.workQueue);
-   g_mutex_unlock(gState.lock);
+   ThreadPoolStateUnlock();
 
    ASSERT(work != NULL);
 
@@ -300,7 +326,7 @@ ToolsCorePoolSubmit(ToolsAppCtx *ctx,
    task->data = data;
    task->dtor = dtor;
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
 
    if (!gState.active) {
       g_free(task);
@@ -351,7 +377,7 @@ ToolsCorePoolSubmit(ToolsAppCtx *ctx,
                                  ToolsCorePoolDestroyTask);
 
 exit:
-   g_mutex_unlock(gState.lock);
+   ThreadPoolStateUnlock();
    return id;
 }
 
@@ -378,7 +404,7 @@ ToolsCorePoolCancel(guint id)
 
    g_return_if_fail(id != 0);
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
    if (!gState.active) {
       goto exit;
    }
@@ -390,7 +416,7 @@ ToolsCorePoolCancel(guint id)
    }
 
 exit:
-   g_mutex_unlock(gState.lock);
+   ThreadPoolStateUnlock();
 
    if (task != NULL) {
       if (task->srcId > 0) {
@@ -431,7 +457,8 @@ ToolsCorePoolStart(ToolsAppCtx *ctx,
    GError *err = NULL;
    StandaloneTask *task = NULL;
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
+
    if (!gState.active) {
       goto exit;
    }
@@ -442,7 +469,11 @@ ToolsCorePoolStart(ToolsAppCtx *ctx,
    task->interrupt = interrupt;
    task->data = data;
    task->dtor = dtor;
+#if GLIB_CHECK_VERSION(2,32,0)
+   task->thread = g_thread_try_new(NULL, ToolsCorePoolRunThread, task, &err);
+#else
    task->thread = g_thread_create(ToolsCorePoolRunThread, task, TRUE, &err);
+#endif
 
    if (err == NULL) {
       g_ptr_array_add(gState.threads, task);
@@ -454,7 +485,7 @@ ToolsCorePoolStart(ToolsAppCtx *ctx,
    }
 
 exit:
-   g_mutex_unlock(gState.lock);
+   ThreadPoolStateUnlock();
    return task != NULL;
 }
 
@@ -526,7 +557,11 @@ ToolsCorePool_Init(ToolsAppCtx *ctx)
    }
 
    gState.active = TRUE;
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&gState.lock);
+#else
    gState.lock = g_mutex_new();
+#endif
    gState.threads = g_ptr_array_new();
    gState.workQueue = g_queue_new();
 
@@ -553,9 +588,9 @@ ToolsCorePool_Shutdown(ToolsAppCtx *ctx)
 {
    guint i;
 
-   g_mutex_lock(gState.lock);
+   ThreadPoolStateLock();
    gState.active = FALSE;
-   g_mutex_unlock(gState.lock);
+   ThreadPoolStateUnlock();
 
    /* Notify all spawned threads to stop. */
    for (i = 0; i < gState.threads->len; i++) {
@@ -589,7 +624,11 @@ ToolsCorePool_Shutdown(ToolsAppCtx *ctx)
    /* Cleanup. */
    g_ptr_array_free(gState.threads, TRUE);
    g_queue_free(gState.workQueue);
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_clear(&gState.lock);
+#else
    g_mutex_free(gState.lock);
+#endif
    memset(&gState, 0, sizeof gState);
    g_object_set(ctx->serviceObj, TOOLS_CORE_PROP_TPOOL, NULL, NULL);
 }

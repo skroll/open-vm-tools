@@ -54,11 +54,35 @@ typedef struct MsgCatalog {
 
 typedef struct MsgState {
    HashTable     *domains; /* List of text domains. */
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         lock;
+#else
    GStaticMutex   lock;    /* Mutex to protect shared state. */
+#endif
 } MsgState;
 
 
 static MsgState *gMsgState = NULL;
+
+static inline void
+MsgStateLock(MsgState *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&self->lock);
+#else
+   g_static_mutex_lock(&self->lock);
+#endif
+}
+
+static inline void
+MsgStateUnlock(MsgState *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&self->lock);
+#else
+   g_static_mutex_unlock(&self->lock);
+#endif
+}
 
 
 /*
@@ -132,7 +156,12 @@ MsgInitState(gpointer unused)
 {
    ASSERT(gMsgState == NULL);
    gMsgState = g_new0(MsgState, 1);
+
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&gMsgState->lock);
+#else
    g_static_mutex_init(&gMsgState->lock);
+#endif
    return NULL;
 }
 
@@ -343,7 +372,7 @@ MsgGetString(const char *domain,
     * This lock is pretty coarse-grained, but a lot of the code below just runs
     * in exceptional situations, so it should be OK.
     */
-   g_static_mutex_lock(&state->lock);
+   MsgStateLock(state);
 
    catalog = MsgGetCatalog(domain);
    if (catalog != NULL) {
@@ -414,7 +443,7 @@ MsgGetString(const char *domain,
       }
    }
 
-   g_static_mutex_unlock(&state->lock);
+   MsgStateUnlock(state);
 
    return strp;
 }
@@ -681,7 +710,11 @@ VMToolsMsgCleanup(void)
       if (gMsgState->domains != NULL) {
          HashTable_Free(gMsgState->domains);
       }
+#if GLIB_CHECK_VERSION(2,32,0)
+      g_mutex_clear(&gMsgState->lock);
+#else
       g_static_mutex_free(&gMsgState->lock);
+#endif
       g_free(gMsgState);
    }
 }
@@ -774,9 +807,9 @@ VMTools_BindTextDomain(const char *domain,
                    "catalog dir '%s'.\n", domain, lang, catdir);
       }
    } else {
-      g_static_mutex_lock(&state->lock);
+      MsgStateLock(state);
       MsgSetCatalog(domain, catalog);
-      g_static_mutex_unlock(&state->lock);
+      MsgStateUnlock(state);
    }
    g_free(file);
    free(dfltdir);

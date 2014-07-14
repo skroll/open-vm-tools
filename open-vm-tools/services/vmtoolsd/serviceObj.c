@@ -35,6 +35,26 @@ typedef struct ServiceProperty {
 
 static gpointer gToolsCoreServiceParentClass;
 
+static inline void
+ToolsCoreServiceLock(ToolsCoreService *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&self->lock);
+#else
+   g_mutex_lock(self->lock);
+#endif
+}
+
+static inline void
+ToolsCoreServiceUnlock(ToolsCoreService *self)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&self->lock);
+#else
+   g_mutex_unlock(self->lock);
+#endif
+}
+
 /**
  * Accumulator function for the "set option" signal. If a handler returns
  * TRUE, sets the result of the signal propagation to TRUE.
@@ -179,15 +199,14 @@ ToolsCoreServiceGetProperty(GObject *object,
    ToolsCoreService *self = (ToolsCoreService *) object;
 
    id -= 1;
-
-   g_mutex_lock(self->lock);
+   ToolsCoreServiceLock(self);
 
    if (id < self->props->len) {
       ServiceProperty *p = &g_array_index(self->props, ServiceProperty, id);
       g_value_set_pointer(value, p->value);
    }
 
-   g_mutex_unlock(self->lock);
+   ToolsCoreServiceUnlock(self);
 }
 
 
@@ -217,14 +236,14 @@ ToolsCoreServiceSetProperty(GObject *object,
 
    id -= 1;
 
-   g_mutex_lock(self->lock);
+   ToolsCoreServiceLock(self);
 
    if (id < self->props->len) {
       p = &g_array_index(self->props, ServiceProperty, id);
       p->value = g_value_get_pointer(value);
    }
 
-   g_mutex_unlock(self->lock);
+   ToolsCoreServiceUnlock(self);
 
    if (p != NULL) {
       g_object_notify(object, p->name);
@@ -260,7 +279,11 @@ ToolsCoreServiceCtor(GType type,
                                                                       params);
 
    self = TOOLSCORE_SERVICE(object);
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&self->lock);
+#else
    self->lock = g_mutex_new();
+#endif
    self->props = g_array_new(FALSE, FALSE, sizeof (ServiceProperty));
 
    return object;
@@ -296,7 +319,11 @@ ToolsCoreServiceDtor(GObject *object)
    }
 
    g_array_free(self->props, TRUE);
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_clear(&self->lock);
+#else
    g_mutex_free(self->lock);
+#endif
 }
 
 
@@ -459,7 +486,7 @@ ToolsCoreService_RegisterProperty(ToolsCoreService *obj,
                                             prop->name,
                                             G_PARAM_READWRITE);
 
-   g_mutex_lock(obj->lock);
+   ToolsCoreServiceLock(obj);
 
    sprop.id = ++PROP_ID_SEQ;
    sprop.name = g_strdup(prop->name);
@@ -467,6 +494,6 @@ ToolsCoreService_RegisterProperty(ToolsCoreService *obj,
    g_array_append_val(obj->props, sprop);
    g_object_class_install_property(G_OBJECT_CLASS(klass), sprop.id, pspec);
 
-   g_mutex_unlock(obj->lock);
+   ToolsCoreServiceUnlock(obj);
 }
 

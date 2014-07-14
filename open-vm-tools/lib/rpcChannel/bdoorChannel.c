@@ -34,13 +34,36 @@
 
 typedef struct BackdoorChannel {
    GMainContext  *mainCtx;
+#if GLIB_CHECK_VERSION(2,32,0)
+   GMutex         outLock;
+#else
    GStaticMutex   outLock;
+#endif
    RpcIn         *in;
    RpcOut        *out;
    gboolean       inStarted;
    gboolean       outStarted;
 } BackdoorChannel;
 
+static inline void
+BackdoorChannelLock(BackdoorChannel *bdoor)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_lock(&bdoor->outLock);
+#else
+   g_static_mutex_lock(&bdoor->outLock);
+#endif
+}
+
+static inline void
+BackdoorChannelUnlock(BackdoorChannel *bdoor)
+{
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_unlock(&bdoor->outLock);
+#else
+   g_static_mutex_unlock(&bdoor->outLock);
+#endif
+}
 
 /**
  * Initializes internal state for the inbound channel.
@@ -119,7 +142,7 @@ RpcInStop(RpcChannel *chan)
 {
    BackdoorChannel *bdoor = chan->_private;
 
-   g_static_mutex_lock(&bdoor->outLock);
+   BackdoorChannelLock(bdoor);
    if (bdoor->out != NULL) {
       if (bdoor->outStarted) {
          RpcOut_stop(bdoor->out);
@@ -128,7 +151,8 @@ RpcInStop(RpcChannel *chan)
    } else {
       ASSERT(!bdoor->outStarted);
    }
-   g_static_mutex_unlock(&bdoor->outLock);
+
+   BackdoorChannelUnlock(bdoor);
 
    if (bdoor->in != NULL) {
       if (bdoor->inStarted) {
@@ -158,7 +182,13 @@ RpcInShutdown(RpcChannel *chan)
       RpcIn_Destruct(bdoor->in);
    }
    RpcOut_Destruct(bdoor->out);
+
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_clear(&bdoor->outLock);
+#else
    g_static_mutex_free(&bdoor->outLock);
+#endif
+
    if (bdoor->mainCtx != NULL) {
       g_main_context_unref(bdoor->mainCtx);
    }
@@ -190,7 +220,7 @@ RpcInSend(RpcChannel *chan,
    size_t replyLen;
    BackdoorChannel *bdoor = chan->_private;
 
-   g_static_mutex_lock(&bdoor->outLock);
+   BackdoorChannelLock(bdoor);
    if (!bdoor->outStarted) {
       goto exit;
    }
@@ -248,7 +278,7 @@ RpcInSend(RpcChannel *chan,
    }
 
 exit:
-   g_static_mutex_unlock(&bdoor->outLock);
+   BackdoorChannelUnlock(bdoor);
    return ret;
 }
 
@@ -268,7 +298,11 @@ BackdoorChannel_New(void)
    ret = RpcChannel_Create();
    bdoor = g_malloc0(sizeof *bdoor);
 
+#if GLIB_CHECK_VERSION(2,32,0)
+   g_mutex_init(&bdoor->outLock);
+#else
    g_static_mutex_init(&bdoor->outLock);
+#endif
    bdoor->out = RpcOut_Construct();
    ASSERT(bdoor->out != NULL);
 

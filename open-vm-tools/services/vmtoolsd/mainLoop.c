@@ -378,7 +378,9 @@ ToolsCore_Setup(ToolsServiceState *state)
    ToolsServiceProperty ctxProp = { TOOLS_CORE_PROP_CTX };
 
    if (!g_thread_supported()) {
+#if !GLIB_CHECK_VERSION(2,32,0)
       g_thread_init(NULL);
+#endif
    }
 
    ToolsCore_ReloadConfig(state, FALSE);
@@ -405,7 +407,9 @@ ToolsCore_Setup(ToolsServiceState *state)
    state->ctx.isVMware = VmCheck_IsVirtualWorld();
    g_main_context_unref(gctx);
 
+#if !GLIB_CHECK_VERSION(2,36,0)
    g_type_init();
+#endif
    state->ctx.serviceObj = g_object_new(TOOLSCORE_TYPE_SERVICE, NULL);
 
    /* Register the core properties. */
