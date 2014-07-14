@@ -73,7 +73,7 @@ SyncDriverIsRemoteFSType(const char *fsType)
 
    for (i = 0; i < ARRAYSIZE(gRemoteFSTypes); i++) {
       if (Str_Strncmp(fsType, gRemoteFSTypes[i],
-                      sizeof gRemoteFSTypes[i]) == 0) {
+                      strlen(gRemoteFSTypes[i])) == 0) {
          return TRUE;
       }
    }
