@@ -74,6 +74,8 @@ int HgfsPrivateGetattr(struct dentry *dentry,
 struct inode *HgfsIget(struct super_block *sb,
                        ino_t ino,
                        HgfsAttrInfo const *attr);
+int HgfsInstantiateRoot(struct super_block *sb,
+                        struct dentry **rootDentry);
 int HgfsInstantiate(struct dentry *dentry,
                     ino_t ino,
                     HgfsAttrInfo const *attr);

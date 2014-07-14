@@ -1,5 +1,5 @@
 /*********************************************************
- * Copyright (C) 2006 VMware, Inc. All rights reserved.
+ * Copyright (C) 2006-2014 VMware, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -53,10 +53,13 @@ static int HgfsUnpackGetattrReply(HgfsReq *req,
                                   HgfsAttrInfo *attr,
                                   char **fileName);
 static int HgfsPackGetattrRequest(HgfsReq *req,
-                                  struct dentry *dentry,
+                                  HgfsOp opUsed,
                                   Bool allowHandleReuse,
-				  HgfsOp opUsed,
+                                  struct dentry *dentry,
                                   HgfsAttrInfo *attr);
+static int HgfsBuildRootPath(char *buffer,
+                             size_t bufferLen,
+                             HgfsSuperInfo *si);
 
 /*
  * Private function implementations.
@@ -234,13 +237,17 @@ HgfsUnpackGetattrReply(HgfsReq *req,        // IN: Reply packet
 /*
  *----------------------------------------------------------------------
  *
- * HgfsPackGetattrRequest --
+ * HgfsPackCommonattr --
  *
- *    Setup the getattr request, depending on the op version. When possible,
- *    we will issue the getattr using an existing open HGFS handle.
+ *    This function abstracts the HgfsAttr struct behind HgfsAttrInfo.
+ *    Callers can pass one of four replies into it and receive back the
+ *    attributes for those replies.
+ *
+ *    Callers must populate attr->requestType so that we know whether to
+ *    expect a V1 or V2 Attr struct.
  *
  * Results:
- *    Returns zero on success, or negative error on failure.
+ *    Zero on success, non-zero otherwise.
  *
  * Side effects:
  *    None
@@ -249,22 +256,18 @@ HgfsUnpackGetattrReply(HgfsReq *req,        // IN: Reply packet
  */
 
 static int
-HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
-                       struct dentry *dentry,   // IN: Dentry containing name
-                       Bool allowHandleReuse,   // IN: Can we use a handle?
-                       HgfsOp opUsed,           // IN: Op to be used
-                       HgfsAttrInfo *attr)      // OUT: Attrs to update
+HgfsPackCommonattr(HgfsReq *req,            // IN/OUT: request buffer
+                   HgfsOp opUsed,           // IN: Op to be used
+                   Bool allowHandleReuse,   // IN: Can we use a handle?
+                   struct inode *fileInode, // IN: file inode
+                   size_t *reqSize,         // OUT: request size
+                   size_t *reqBufferSize,   // OUT: request buffer size
+                   char **fileName,         // OUT: pointer to request file name
+                   uint32 **fileNameLength, // OUT: pointer to request file name length
+                   HgfsAttrInfo *attr)      // OUT: Attrs to update
 {
-   size_t reqBufferSize;
-   size_t reqSize;
-   int result = 0;
    HgfsHandle handle;
-   char *fileName = NULL;
-   uint32 *fileNameLength = NULL;
-
-   ASSERT(attr);
-   ASSERT(dentry);
-   ASSERT(req);
+   int result = 0;
 
    attr->requestType = opUsed;
 
@@ -287,24 +290,25 @@ HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
        * by name.
        */
       requestV3->hints = 0;
-      if (allowHandleReuse && HgfsGetHandle(dentry->d_inode,
+      if (allowHandleReuse && HgfsGetHandle(fileInode,
                                             0,
                                             &handle) == 0) {
          requestV3->fileName.flags = HGFS_FILE_NAME_USE_FILE_DESC;
          requestV3->fileName.fid = handle;
          requestV3->fileName.length = 0;
          requestV3->fileName.caseType = HGFS_FILE_NAME_DEFAULT_CASE;
-         fileName = NULL;
+         *fileName = NULL;
+         *fileNameLength = NULL;
       } else {
-         fileName = requestV3->fileName.name;
-         fileNameLength = &requestV3->fileName.length;
+         *fileName = requestV3->fileName.name;
+         *fileNameLength = &requestV3->fileName.length;
          requestV3->fileName.flags = 0;
          requestV3->fileName.fid = HGFS_INVALID_HANDLE;
          requestV3->fileName.caseType = HGFS_FILE_NAME_CASE_SENSITIVE;
       }
       requestV3->reserved = 0;
-      reqSize = HGFS_REQ_PAYLOAD_SIZE_V3(requestV3);
-      reqBufferSize = HGFS_NAME_BUFFER_SIZET(req->bufferSize, reqSize);
+      *reqSize = HGFS_REQ_PAYLOAD_SIZE_V3(requestV3);
+      *reqBufferSize = HGFS_NAME_BUFFER_SIZET(req->bufferSize, *reqSize);
       break;
    }
 
@@ -321,19 +325,20 @@ HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
        * correct regardless. If we don't find a handle, fall back on getattr
        * by name.
        */
-      if (allowHandleReuse && HgfsGetHandle(dentry->d_inode,
+      if (allowHandleReuse && HgfsGetHandle(fileInode,
                                             0,
                                             &handle) == 0) {
          requestV2->hints = HGFS_ATTR_HINT_USE_FILE_DESC;
          requestV2->file = handle;
-         fileName = NULL;
+         *fileName = NULL;
+         *fileNameLength = NULL;
       } else {
          requestV2->hints = 0;
-         fileName = requestV2->fileName.name;
-         fileNameLength = &requestV2->fileName.length;
+         *fileName = requestV2->fileName.name;
+         *fileNameLength = &requestV2->fileName.length;
       }
-      reqSize = sizeof *requestV2;
-      reqBufferSize = HGFS_NAME_BUFFER_SIZE(req->bufferSize, requestV2);
+      *reqSize = sizeof *requestV2;
+      *reqBufferSize = HGFS_NAME_BUFFER_SIZE(req->bufferSize, requestV2);
       break;
    }
 
@@ -344,10 +349,10 @@ HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
       requestV1->header.op = opUsed;
       requestV1->header.id = req->id;
 
-      fileName = requestV1->fileName.name;
-      fileNameLength = &requestV1->fileName.length;
-      reqSize = sizeof *requestV1;
-      reqBufferSize = HGFS_NAME_BUFFER_SIZE(req->bufferSize, requestV1);
+      *fileName = requestV1->fileName.name;
+      *fileNameLength = &requestV1->fileName.length;
+      *reqSize = sizeof *requestV1;
+      *reqBufferSize = HGFS_NAME_BUFFER_SIZE(req->bufferSize, requestV1);
       break;
    }
 
@@ -355,6 +360,57 @@ HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRequest: unexpected "
               "OP type encountered\n"));
       result = -EPROTO;
+      break;
+   }
+
+   return result;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsPackGetattrRequest --
+ *
+ *    Setup the getattr request, depending on the op version. When possible,
+ *    we will issue the getattr using an existing open HGFS handle.
+ *
+ * Results:
+ *    Returns zero on success, or negative error on failure.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
+                       HgfsOp opUsed,           // IN: Op to be used
+                       Bool allowHandleReuse,   // IN: Can we use a handle?
+                       struct dentry *dentry,   // IN: Dentry containing name
+                       HgfsAttrInfo *attr)      // OUT: Attrs to update
+{
+   size_t reqBufferSize;
+   size_t reqSize;
+   char *fileName = NULL;
+   uint32 *fileNameLength = NULL;
+   int result = 0;
+
+   ASSERT(attr);
+   ASSERT(dentry);
+   ASSERT(req);
+
+   result = HgfsPackCommonattr(req,
+                               opUsed,
+                               allowHandleReuse,
+                               dentry->d_inode,
+                               &reqSize,
+                               &reqBufferSize,
+                               &fileName,
+                               &fileNameLength,
+                               attr);
+   if (0 > result) {
       goto out;
    }
 
@@ -364,8 +420,90 @@ HgfsPackGetattrRequest(HgfsReq *req,            // IN/OUT: Request buffer
       /* Build full name to send to server. */
       if (HgfsBuildPath(fileName, reqBufferSize,
                         dentry) < 0) {
-         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRequest: build path "
-                 "failed\n"));
+         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRequest: build path failed\n"));
+         result = -EINVAL;
+         goto out;
+      }
+      LOG(6, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRequest: getting attrs for \"%s\"\n",
+              fileName));
+
+      /* Convert to CP name. */
+      result = CPName_ConvertTo(fileName,
+                                reqBufferSize,
+                                fileName);
+      if (result < 0) {
+         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRequest: CP conversion failed\n"));
+         result = -EINVAL;
+         goto out;
+      }
+
+      *fileNameLength = result;
+   }
+
+   req->payloadSize = reqSize + result;
+   result = 0;
+
+out:
+   return result;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsPackGetattrRootRequest --
+ *
+ *    Setup the getattr request for the root of the HGFS file system.
+ *
+ *    When possible, we will issue the getattr using an existing open HGFS handle.
+ *
+ * Results:
+ *    Returns zero on success, or negative error on failure.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+HgfsPackGetattrRootRequest(HgfsReq *req,            // IN/OUT: Request buffer
+                           HgfsOp opUsed,           // IN: Op to be used
+                           struct super_block *sb,  // IN: Super block entry
+                           HgfsAttrInfo *attr)      // OUT: Attrs to update
+{
+   size_t reqBufferSize;
+   size_t reqSize;
+   char *fileName = NULL;
+   uint32 *fileNameLength = NULL;
+   int result = 0;
+
+   ASSERT(attr);
+   ASSERT(sb);
+   ASSERT(req);
+
+   result = HgfsPackCommonattr(req,
+                               opUsed,
+                               FALSE,
+                               NULL,
+                               &reqSize,
+                               &reqBufferSize,
+                               &fileName,
+                               &fileNameLength,
+                               attr);
+   if (0 > result) {
+      goto out;
+   }
+
+   /* Avoid all this extra work when we're doing a getattr by handle. */
+   if (fileName != NULL) {
+      HgfsSuperInfo *si = HGFS_SB_TO_COMMON(sb);
+
+      /* Build full name to send to server. */
+      if (HgfsBuildRootPath(fileName,
+                            reqBufferSize,
+                            si) < 0) {
+         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPackGetattrRootRequest: build path failed\n"));
          result = -EINVAL;
          goto out;
       }
@@ -511,7 +649,8 @@ HgfsUnpackCommonAttr(HgfsReq *req,            // IN: Reply packet
          attrInfo->groupId = attrV2->groupId;
          attrInfo->mask |= HGFS_ATTR_VALID_GROUPID;
       }
-      if (attrV2->mask & HGFS_ATTR_VALID_FILEID) {
+      if (attrV2->mask & (HGFS_ATTR_VALID_FILEID |
+                          HGFS_ATTR_VALID_NON_STATIC_FILEID)) {
          attrInfo->hostFileId = attrV2->hostFileId;
          attrInfo->mask |= HGFS_ATTR_VALID_FILEID;
       }
@@ -578,6 +717,18 @@ HgfsCalcBlockSize(uint64 tsize)
 }
 #endif
 
+
+static inline int
+hgfs_timespec_compare(const struct timespec *lhs, const struct timespec *rhs)
+{
+   if (lhs->tv_sec < rhs->tv_sec)
+      return -1;
+   if (lhs->tv_sec > rhs->tv_sec)
+      return 1;
+   return lhs->tv_nsec - rhs->tv_nsec;
+}
+
+
 /*
  *----------------------------------------------------------------------
  *
@@ -640,6 +791,74 @@ HgfsSetInodeUidGid(struct inode *inode,          // IN/OUT: Inode
    }
 }
 
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * HgfsIsInodeWritable --
+ *
+ *      Helper function for verifying if a file is under write access.
+ *
+ * Results:
+ *      TRUE if file is writable, FALSE otherwise.
+ *
+ * Side effects:
+ *      None.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static Bool
+HgfsIsInodeWritable(struct inode *inode) // IN: File we're writing to
+{
+   HgfsInodeInfo *iinfo;
+   struct list_head *cur;
+   Bool isWritable = FALSE;
+
+   iinfo = INODE_GET_II_P(inode);
+   /*
+    * Iterate over the open handles for this inode, and find if there
+    * is one that allows the write mode.
+    * Note, the mode is stored as incremented by one to prevent overload of
+    * the zero value.
+    */
+   spin_lock(&hgfsBigLock);
+   list_for_each(cur, &iinfo->files) {
+      HgfsFileInfo *finfo = list_entry(cur, HgfsFileInfo, list);
+
+      if (0 != (finfo->mode & (HGFS_OPEN_MODE_WRITE_ONLY + 1))) {
+         isWritable = TRUE;
+         break;
+      }
+   }
+   spin_unlock(&hgfsBigLock);
+
+   return isWritable;
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * HgfsIsSafeToChange --
+ *
+ *      Helper function for verifying if a file inode size and time fields is safe
+ *      to update. It is deemed safe only if there is not an open writer to the file.
+ *
+ * Results:
+ *      TRUE if safe to change inode, FALSE otherwise.
+ *
+ * Side effects:
+ *      None.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static Bool
+HgfsIsSafeToChange(struct inode *inode) // IN: File we're writing to
+{
+   return !HgfsIsInodeWritable(inode);
+}
+
 
 /*
  *----------------------------------------------------------------------
@@ -665,13 +884,34 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
                          HgfsAttrInfo const *attr)     // IN: New attrs
 {
    HgfsSuperInfo *si;
+   HgfsInodeInfo *iinfo;
    Bool needInvalidate = FALSE;
+   Bool isSafeToChange;
 
    ASSERT(inode);
    ASSERT(inode->i_sb);
    ASSERT(attr);
 
    si = HGFS_SB_TO_COMMON(inode->i_sb);
+   iinfo = INODE_GET_II_P(inode);
+
+   /*
+    * We do not want to update the file size from server or invalidate the inode
+    * for inodes open for write. We need to avoid races with the write page
+    * extending the file. This also will cause the server to possibly update the
+    * server side file's mod time too. For those situations we do not want to blindly
+    * go and invalidate the inode pages thus losing changes in flight and corrupting the
+    * file.
+    * We only need to invalidate the inode pages if the file has truly been modified
+    * on the server side by another server side application, not by our writes.
+    * If there are no writers it is safe to assume that newer mod time means the file
+    * changed on the server side underneath us.
+    */
+   isSafeToChange = HgfsIsSafeToChange(inode);
+
+   spin_lock(&inode->i_lock);
+
+   iinfo = INODE_GET_II_P(inode);
 
    LOG(6, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: entered\n"));
    HgfsSetFileType(inode, attr);
@@ -742,21 +982,23 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
 
    /*
     * Invalidate cached pages if we didn't receive the file size, or if it has
-    * changed on the server.
+    * changed on the server, and no writes in flight.
     */
    if (attr->mask & HGFS_ATTR_VALID_SIZE) {
       loff_t oldSize = compat_i_size_read(inode);
       inode->i_blocks = (attr->size + HGFS_BLOCKSIZE - 1) / HGFS_BLOCKSIZE;
       if (oldSize != attr->size) {
-         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: new file "
-                 "size: %"FMT64"u, old file size: %Lu\n", attr->size, oldSize));
-         needInvalidate = TRUE;
+         if (oldSize < attr->size || (iinfo->numWbPages == 0 && isSafeToChange)) {
+            needInvalidate = TRUE;
+            LOG(4, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: new file "
+                    "size: %"FMT64"u, old file size: %Lu\n", attr->size, oldSize));
+            inode->i_blocks = HgfsCalcBlockSize(attr->size);
+            compat_i_size_write(inode, attr->size);
+         }
       }
-      compat_i_size_write(inode, attr->size);
    } else {
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: did not "
               "get file size\n"));
-      needInvalidate = TRUE;
    }
 
    if (attr->mask & HGFS_ATTR_VALID_ACCESS_TIME) {
@@ -767,12 +1009,15 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
 
    /*
     * Invalidate cached pages if we didn't receive the modification time, or if
-    * it has changed on the server.
+    * it has changed on the server and we don't have writes in flight and any open
+    * open writers.
     */
    if (attr->mask & HGFS_ATTR_VALID_WRITE_TIME) {
       HGFS_DECLARE_TIME(newTime);
       HGFS_SET_TIME(newTime, attr->writeTime);
-      if (!HGFS_EQUAL_TIME(newTime, inode->i_mtime)) {
+      if (hgfs_timespec_compare(&newTime, &inode->i_mtime) > 0 &&
+          iinfo->numWbPages == 0 &&
+          isSafeToChange) {
          LOG(4, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: new mod "
                  "time: %ld:%lu, old mod time: %ld:%lu\n",
                  HGFS_PRINT_TIME(newTime), HGFS_PRINT_TIME(inode->i_mtime)));
@@ -780,7 +1025,6 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
       }
       HGFS_SET_TIME(inode->i_mtime, attr->writeTime);
    } else {
-      needInvalidate = TRUE;
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsChangeFileAttributes: did not "
               "get mod time\n"));
       HGFS_SET_TIME(inode->i_mtime, HGFS_GET_CURRENT_TIME());
@@ -798,6 +1042,8 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
       HGFS_SET_TIME(inode->i_ctime, HGFS_GET_CURRENT_TIME());
    }
 
+   spin_unlock(&inode->i_lock);
+
    /*
     * Compare old size and write time with new size and write time. If there's
     * a difference (or if we didn't get a new size or write time), the file
@@ -809,6 +1055,212 @@ HgfsChangeFileAttributes(struct inode *inode,          // IN/OUT: Inode
       compat_filemap_write_and_wait(inode->i_mapping);
       compat_invalidate_remote_inode(inode);
    }
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsCanRetryGetattrRequest --
+ *
+ *    Checks the getattr request version and downgrades the global getattr
+ *    version if we can.
+ *
+ * Results:
+ *    Returns TRUE on success and downgrades the global getattr protocol version,
+ *    or FALSE if no retry is possible.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static Bool
+HgfsCanRetryGetattrRequest(HgfsOp getattrOp)     // IN: getattrOp version used
+{
+   Bool canRetry = FALSE;
+
+   /* Retry with older version(s). Set globally. */
+   if (getattrOp == HGFS_OP_GETATTR_V3) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsCanRetryGetattrRequest: Version 3 "
+               "not supported. Falling back to version 2.\n"));
+      hgfsVersionGetattr = HGFS_OP_GETATTR_V2;
+      canRetry = TRUE;
+   } else if (getattrOp == HGFS_OP_GETATTR_V2) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsCanRetryGetattrRequest: Version 2 "
+               "not supported. Falling back to version 1.\n"));
+      hgfsVersionGetattr = HGFS_OP_GETATTR;
+      canRetry = TRUE;
+   }
+   return canRetry;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsSendGetattrRequest --
+ *
+ *    Send the getattr request and handle the reply.
+ *
+ * Results:
+ *    Returns zero on success, or a negative error on failure.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+int
+HgfsSendGetattrRequest(HgfsReq *req,           // IN: getattr request
+                       Bool *doRetry,          // OUT: Retry getattr request
+                       Bool *allowHandleReuse, // IN/OUT: handle reuse
+                       HgfsAttrInfo *attr,     // OUT: Attr to copy into
+                       char **fileName)        // OUT: pointer to allocated file name
+{
+   int result;
+
+   *doRetry = FALSE;
+
+   result = HgfsSendRequest(req);
+   if (result == 0) {
+      HgfsStatus replyStatus = HgfsReplyStatus(req);
+
+      result = HgfsStatusConvertToLinux(replyStatus);
+
+      LOG(6, (KERN_DEBUG "VMware hgfs: HgfsSendGetattrRequest: reply status %d -> %d\n",
+              replyStatus, result));
+
+      /*
+       * If the getattr succeeded on the server, copy the stats
+       * into the HgfsAttrInfo, otherwise return an error.
+       */
+      switch (result) {
+      case 0:
+         result = HgfsUnpackGetattrReply(req, attr, fileName);
+         break;
+
+      case -EIO:
+	 /*
+	  * Fix for bug 548177.
+	  * When user deletes a share, we still show that share during directory
+	  * enumeration to minimize user's surprise. Now when we get getattr on
+	  * that share server returns EIO. Linux file manager doesn't like this,
+	  * and it doesn't display any valid shares too. So as a workaround, we
+	  * remap EIO to success and create minimal fake attributes.
+	  */
+         LOG(1, (KERN_DEBUG "Hgfs: HgfsSetInodeUidGid: Server returned EIO on unknown file\n"));
+         /* Create fake attributes */
+         attr->mask = HGFS_ATTR_VALID_TYPE | HGFS_ATTR_VALID_SIZE;
+         attr->type = HGFS_FILE_TYPE_DIRECTORY;
+         attr->size = 0;
+         result = 0;
+         break;
+
+      case -EBADF:
+         /*
+          * This can happen if we attempted a getattr by handle and the handle
+          * was closed. Because we have no control over the backdoor, it's
+          * possible that an attacker closed our handle, in which case the
+          * driver still thinks the handle is open. So a straight-up
+          * "goto retry" would cause an infinite loop. Instead, let's retry
+          * with a getattr by name.
+          */
+         if (*allowHandleReuse) {
+            *allowHandleReuse = FALSE;
+            *doRetry = TRUE;
+         }
+
+         /*
+          * There's no reason why the server should have sent us this error
+          * when we haven't used a handle. But to prevent an infinite loop in
+          * the driver, let's make sure that we don't retry again.
+          */
+         break;
+
+      case -EPROTO:
+         /* Retry with older version(s). Set globally. */
+         if (HgfsCanRetryGetattrRequest(attr->requestType)) {
+            *doRetry = TRUE;
+         }
+         break;
+
+      default:
+         break;
+      }
+   } else if (result == -EIO) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: timed out\n"));
+   } else if (result == -EPROTO) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: server "
+              "returned error: %d\n", result));
+   } else {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsSendGetattrRequest: unknown error: %d\n",
+              result));
+   }
+
+   return result;
+}
+
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * HgfsPrivateGetattrRoot --
+ *
+ *    The getattr for the root. Send a getattr request to the server
+ *    for the indicated remote name, and if it succeeds copy the
+ *    results of the getattr into the provided HgfsAttrInfo.
+ *
+ *    fileName (of the root) will be set to a newly allocated string.
+ *
+ * Results:
+ *    Returns zero on success, or a negative error on failure.
+ *
+ * Side effects:
+ *    None
+ *
+ *----------------------------------------------------------------------
+ */
+
+int
+HgfsPrivateGetattrRoot(struct super_block *sb, // IN: Super block object
+                       HgfsAttrInfo *attr)     // OUT: Attr to copy into
+{
+   HgfsReq *req;
+   HgfsOp opUsed;
+   int result = 0;
+   Bool doRetry;
+   Bool allowHandleReuse = FALSE;
+
+   ASSERT(sb);
+   ASSERT(attr);
+
+   req = HgfsGetNewRequest();
+   if (!req) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattrRoot: out of memory "
+              "while getting new request\n"));
+      result = -ENOMEM;
+      goto out;
+   }
+
+retry:
+   opUsed = hgfsVersionGetattr;
+   result = HgfsPackGetattrRootRequest(req, opUsed, sb, attr);
+   if (result != 0) {
+      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattrRoot: no attrs\n"));
+      goto out;
+   }
+
+   result = HgfsSendGetattrRequest(req, &doRetry, &allowHandleReuse, attr, NULL);
+   if (0 != result && doRetry) {
+      goto retry;
+   }
+
+out:
+   HgfsFreeRequest(req);
+   return result;
 }
 
 
@@ -839,9 +1291,9 @@ HgfsPrivateGetattr(struct dentry *dentry,  // IN: Dentry containing name
                    char **fileName)        // OUT: pointer to allocated file name
 {
    HgfsReq *req;
-   HgfsStatus replyStatus;
    HgfsOp opUsed;
    int result = 0;
+   Bool doRetry;
    Bool allowHandleReuse = TRUE;
 
    ASSERT(dentry);
@@ -856,94 +1308,17 @@ HgfsPrivateGetattr(struct dentry *dentry,  // IN: Dentry containing name
       goto out;
    }
 
-  retry:
-
+retry:
    opUsed = hgfsVersionGetattr;
-   result = HgfsPackGetattrRequest(req, dentry, allowHandleReuse, opUsed, attr);
+   result = HgfsPackGetattrRequest(req, opUsed, allowHandleReuse, dentry, attr);
    if (result != 0) {
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: no attrs\n"));
       goto out;
    }
 
-   result = HgfsSendRequest(req);
-   if (result == 0) {
-      LOG(6, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: got reply\n"));
-      replyStatus = HgfsReplyStatus(req);
-      result = HgfsStatusConvertToLinux(replyStatus);
-
-      /*
-       * If the getattr succeeded on the server, copy the stats
-       * into the HgfsAttrInfo, otherwise return an error.
-       */
-      switch (result) {
-      case 0:
-         result = HgfsUnpackGetattrReply(req, attr, fileName);
-         break;
-
-      case -EIO:
-	 /*
-	  * Fix for bug 548177.
-	  * When user deletes a share, we still show that share during directory
-	  * enumeration to minimize user's surprise. Now when we get getattr on
-	  * that share server returns EIO. Linux file manager doesn't like this,
-	  * and it doesn't display any valid shares too. So as a workaround, we
-	  * remap EIO to success and create minimal fake attributes.
-	  */
-         LOG(1, (KERN_DEBUG "Hgfs:Server returned EIO on unknown file\n"));
-         /* Create fake attributes */
-         attr->mask = HGFS_ATTR_VALID_TYPE | HGFS_ATTR_VALID_SIZE;
-         attr->type = HGFS_FILE_TYPE_DIRECTORY;
-         attr->size = 0;
-         result = 0;
-         break;
-
-      case -EBADF:
-         /*
-          * This can happen if we attempted a getattr by handle and the handle
-          * was closed. Because we have no control over the backdoor, it's
-          * possible that an attacker closed our handle, in which case the
-          * driver still thinks the handle is open. So a straight-up
-          * "goto retry" would cause an infinite loop. Instead, let's retry
-          * with a getattr by name.
-          */
-         if (allowHandleReuse) {
-            allowHandleReuse = FALSE;
-            goto retry;
-         }
-
-         /*
-          * There's no reason why the server should have sent us this error
-          * when we haven't used a handle. But to prevent an infinite loop in
-          * the driver, let's make sure that we don't retry again.
-          */
-         break;
-
-      case -EPROTO:
-         /* Retry with older version(s). Set globally. */
-         if (attr->requestType == HGFS_OP_GETATTR_V3) {
-            LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: Version 3 "
-                    "not supported. Falling back to version 2.\n"));
-            hgfsVersionGetattr = HGFS_OP_GETATTR_V2;
-            goto retry;
-         } else if (attr->requestType == HGFS_OP_GETATTR_V2) {
-            LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: Version 2 "
-                    "not supported. Falling back to version 1.\n"));
-            hgfsVersionGetattr = HGFS_OP_GETATTR;
-            goto retry;
-         }
-
-         /* Fallthrough. */
-      default:
-         break;
-      }
-   } else if (result == -EIO) {
-      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: timed out\n"));
-   } else if (result == -EPROTO) {
-      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: server "
-              "returned error: %d\n", result));
-   } else {
-      LOG(4, (KERN_DEBUG "VMware hgfs: HgfsPrivateGetattr: unknown error: "
-              "%d\n", result));
+   result = HgfsSendGetattrRequest(req, &doRetry, &allowHandleReuse, attr, fileName);
+   if (0 != result && doRetry) {
+      goto retry;
    }
 
 out:
@@ -1099,6 +1474,106 @@ HgfsIget(struct super_block *sb,         // IN: Superblock of this fs
 /*
  *-----------------------------------------------------------------------------
  *
+ * HgfsInstantiateRoot --
+ *
+ *    Gets the root dentry for a given super block.
+ *
+ * Results:
+ *    zero and a valid root dentry on success
+ *    negative value on failure
+ *
+ * Side effects:
+ *    None.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+int
+HgfsInstantiateRoot(struct super_block *sb,       // IN: Super block object
+                    struct dentry **rootDentry)   // OUT: Root dentry
+{
+   int result = -ENOMEM;
+   struct inode *rootInode;
+   struct dentry *tempRootDentry = NULL;
+   struct HgfsAttrInfo rootDentryAttr;
+   HgfsInodeInfo *iinfo;
+
+   ASSERT(sb);
+   ASSERT(rootDentry);
+
+   LOG(6, (KERN_DEBUG "VMware hgfs: HgfsInstantiateRoot: entered\n"));
+
+   rootInode = HgfsGetInode(sb, HGFS_ROOT_INO);
+   if (rootInode == NULL) {
+      LOG(6, (KERN_DEBUG "VMware hgfs: HgfsInstantiateRoot: Could not get the root inode\n"));
+      goto exit;
+   }
+
+   /*
+    * On an allocation failure in read_super, the inode will have been
+    * marked "bad". If it was, we certainly don't want to start playing with
+    * the HgfsInodeInfo. So quietly put the inode back and fail.
+    */
+   if (is_bad_inode(rootInode)) {
+      LOG(6, (KERN_DEBUG "VMware hgfs: HgfsInstantiateRoot: encountered bad inode\n"));
+      goto exit;
+   }
+
+   LOG(8, (KERN_DEBUG "VMware hgfs: HgfsInstantiateRoot: retrieve root attrs\n"));
+   result = HgfsPrivateGetattrRoot(sb, &rootDentryAttr);
+   if (result) {
+      LOG(4, (KERN_WARNING "VMware hgfs: HgfsInstantiateRoot: Could not the root attrs\n"));
+      goto exit;
+   }
+
+   iinfo = INODE_GET_II_P(rootInode);
+   iinfo->isFakeInodeNumber = FALSE;
+   iinfo->isReferencedInode = TRUE;
+
+   if (rootDentryAttr.mask & HGFS_ATTR_VALID_FILEID) {
+      iinfo->hostFileId = rootDentryAttr.hostFileId;
+   }
+
+   HgfsChangeFileAttributes(rootInode, &rootDentryAttr);
+
+   /*
+    * Now the initialization of the inode is complete we can create
+    * the root dentry which has flags initialized from the inode itself.
+    */
+   tempRootDentry = d_make_root(rootInode);
+   /*
+    * d_make_root() does iput() on failure; if d_make_root() completes
+    * successfully then subsequent dput() will do iput() for us, so we
+    * should just ignore root inode from now on.
+    */
+   rootInode = NULL;
+
+   if (tempRootDentry == NULL) {
+      LOG(4, (KERN_WARNING "VMware hgfs: HgfsInstantiateRoot: Could not get "
+              "root dentry\n"));
+      goto exit;
+   }
+
+   HgfsDentryAgeReset(tempRootDentry);
+   tempRootDentry->d_op = &HgfsDentryOperations;
+
+   *rootDentry = tempRootDentry;
+   result = 0;
+
+   LOG(6, (KERN_DEBUG "VMware hgfs: HgfsInstantiateRoot: finished\n"));
+exit:
+   if (result) {
+      iput(rootInode);
+      dput(tempRootDentry);
+      *rootDentry = NULL;
+   }
+   return result;
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
  * HgfsInstantiate --
  *
  *    Tie a dentry to a looked up or created inode. Callers may choose to
@@ -1163,6 +1638,45 @@ HgfsInstantiate(struct dentry *dentry,    // IN: Dentry to use
 /*
  *-----------------------------------------------------------------------------
  *
+ * HgfsBuildRootPath --
+ *
+ *    Constructs the root path given the super info.
+ *
+ * Results:
+ *    If non-negative, the length of the buffer written.
+ *    Otherwise, an error code.
+ *
+ * Side effects:
+ *    None
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+int
+HgfsBuildRootPath(char *buffer,           // IN/OUT: Buffer to write into
+                  size_t bufferLen,       // IN: Size of buffer
+                  HgfsSuperInfo *si)      // IN: First dentry to walk
+{
+   size_t shortestNameLength;
+   /*
+    * Buffer must hold at least the share name (which is already prefixed with
+    * a forward slash), and nul.
+    */
+   shortestNameLength = si->shareNameLen + 1;
+   if (bufferLen < shortestNameLength) {
+      return -ENAMETOOLONG;
+   }
+   memcpy(buffer, si->shareName, shortestNameLength);
+
+   /* Short-circuit if we're at the root already. */
+   LOG(4, (KERN_DEBUG "VMware hgfs: HgfsBuildRootPath: root path \"%s\"\n", buffer));
+   return shortestNameLength;
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
  * HgfsBuildPath --
  *
  *    Constructs the full path given a dentry by walking the dentry and its
@@ -1184,7 +1698,7 @@ HgfsBuildPath(char *buffer,           // IN/OUT: Buffer to write into
               size_t bufferLen,       // IN: Size of buffer
               struct dentry *dentry)  // IN: First dentry to walk
 {
-   int retval = 0;
+   int retval;
    size_t shortestNameLength;
    HgfsSuperInfo *si;
 
@@ -1194,26 +1708,23 @@ HgfsBuildPath(char *buffer,           // IN/OUT: Buffer to write into
 
    si = HGFS_SB_TO_COMMON(dentry->d_sb);
 
-   /*
-    * Buffer must hold at least the share name (which is already prefixed with
-    * a forward slash), and nul.
-    */
-   shortestNameLength = si->shareNameLen + 1;
-   if (bufferLen < shortestNameLength) {
-      return -ENAMETOOLONG;
+   retval = HgfsBuildRootPath(buffer, bufferLen, si);
+   if (0 > retval) {
+      return retval;
    }
-   memcpy(buffer, si->shareName, shortestNameLength);
 
    /* Short-circuit if we're at the root already. */
    if (IS_ROOT(dentry)) {
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsBuildPath: Sending root \"%s\"\n",
               buffer));
-      return shortestNameLength;
+      return retval;
    }
 
    /* Skip the share name, but overwrite our previous nul. */
+   shortestNameLength = retval;
    buffer += shortestNameLength - 1;
    bufferLen -= shortestNameLength - 1;
+   retval = 0;
 
    /*
     * Build the path string walking the tree backward from end to ROOT
@@ -1230,8 +1741,8 @@ HgfsBuildPath(char *buffer,           // IN/OUT: Buffer to write into
       if (bufferLen < 0) {
          compat_unlock_dentry(dentry);
          dput(dentry);
-	 LOG(4, (KERN_DEBUG "VMware hgfs: HgfsBuildPath: Ran out of space "
-	         "while writing dentry name\n"));
+         LOG(4, (KERN_DEBUG "VMware hgfs: HgfsBuildPath: Ran out of space "
+                 "while writing dentry name\n"));
          return -ENAMETOOLONG;
       }
       buffer[bufferLen] = '/';
@@ -1305,7 +1816,7 @@ HgfsDentryAgeReset(struct dentry *dentry) // IN: Dentry whose age to reset
 /*
  *-----------------------------------------------------------------------------
  *
- * HgfsDentryAgeReset --
+ * HgfsDentryAgeForce --
  *
  *    Set the dentry's time to 0. This makes the dentry's age "too old" and
  *    forces subsequent HgfsRevalidates to go to the server for attributes.
@@ -1808,5 +2319,7 @@ HgfsDoReadInode(struct inode *inode)  // IN: Inode to initialize
    iinfo->isReferencedInode = FALSE;
    iinfo->isFakeInodeNumber = FALSE;
    iinfo->createdAndUnopened = FALSE;
+   iinfo->numWbPages = 0;
+   INIT_LIST_HEAD(&iinfo->listWbPages);
 
 }
