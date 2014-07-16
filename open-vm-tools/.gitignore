@@ -2,7 +2,14 @@
 *.swp
 *.o
 *.ko
- 
+*.o.cmd
+*.ko.cmd
+*.mod.c
+Module.symvers
+Module.order
+modules.order
+.tmp_versions/
+
 # autoconf generated files
 *.cache
 .deps
@@ -41,12 +48,17 @@ scripts/poweroff-vm-default
 scripts/poweron-vm-default
 scripts/resume-vm-default
 scripts/suspend-vm-default
+services/plugins/desktopEvents/sessionMgrSignals.c
+services/plugins/desktopEvents/sessionMgrSignals.h
+services/plugins/dndcp/cpFileContents.h
+services/plugins/dndcp/cpFileContents_xdr.c
 services/plugins/vmbackup/vmBackupSignals.c
 services/plugins/vmbackup/vmBackupSignals.h
 services/vmtoolsd/svcSignals.c
 services/vmtoolsd/svcSignals.h
 services/vmtoolsd/vmtoolsd
 toolbox/vmware-toolbox-cmd
+vmblock-fuse/vmware-vmblock-fuse
 vmware-user-suid-wrapper/vmware-user-suid-wrapper
 vmware-user-suid-wrapper/vmware-user.desktop
 xferlogs/vmware-xferlogs
