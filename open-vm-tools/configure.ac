@@ -942,8 +942,19 @@ if test "$os" = "linux"; then
 
    LIBVMTOOLS_LIBADD="$LIBVMTOOLS_LIBADD -lrt"
 
-   MODULES="$MODULES vmsync vmci vsock"
-   MODULES="$MODULES vmxnet vmblock vmhgfs"
+   MODULES="$MODULES vmxnet vmhgfs"
+
+   # See if we need vmci and vsock modules. Starting with 3.9 they made
+   # their way into mainline kernel.
+   if test "$osVersion" -lt 309000; then
+      MODULES="$MODULES vmci vsock"
+    fi
+   # Starting with 3.0, vmblock is deprecated in favor of vmblock-fuse,
+   # and vmsync is not compiled since 3.0+ kernels support FIFREEZE/FITHAW
+   # ioctls.
+   if test "$osVersion" -lt 300000; then
+      MODULES="$MODULES vmblock vmsync"
+   fi
    buildHgfsmounter=yes
 fi
 
