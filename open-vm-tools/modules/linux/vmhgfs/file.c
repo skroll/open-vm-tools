@@ -76,7 +76,6 @@ static int HgfsGetOpenFlags(uint32 flags);
 static int HgfsOpen(struct inode *inode,
                     struct file *file);
 #if defined VMW_USE_AIO
-#  if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 static ssize_t HgfsAioRead(struct kiocb *iocb,
                            const struct iovec *iov,
                            unsigned long numSegs,
@@ -85,7 +84,6 @@ static ssize_t HgfsAioWrite(struct kiocb *iocb,
                             const struct iovec *iov,
                             unsigned long numSegs,
                             loff_t offset);
-#  endif
 #else
 static ssize_t HgfsRead(struct file *file,
                         char __user *buf,
@@ -155,14 +153,13 @@ struct file_operations HgfsFileFileOperations = {
 #ifdef VMW_USE_AIO
    .read       = do_sync_read,
    .write      = do_sync_write,
-#   if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
-   .read_iter = generic_file_read_iter,
-   .write_iter = generic_file_write_iter,
-#   else
    .aio_read   = HgfsAioRead,
    .aio_write  = HgfsAioWrite,
-#   endif
 #else /* !VMW_USE_AIO */
+#  if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
+   .read_iter = generic_file_read_iter,
+   .write_iter = generic_file_write_iter,
+# endif
    .read       = HgfsRead,
    .write      = HgfsWrite,
 #endif /* !VMW_USE_AIO */
@@ -755,7 +752,6 @@ out:
 
 
 #if defined VMW_USE_AIO
-#  if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 /*
  *----------------------------------------------------------------------
  *
@@ -890,8 +886,6 @@ out:
    spin_unlock(&writeDentry->d_inode->i_lock);
    return result;
 }
-
-#   endif /* if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0) */
 #else
 /*
  *----------------------------------------------------------------------
@@ -933,8 +927,11 @@ HgfsRead(struct file *file,  // IN:  File to read from
       LOG(4, (KERN_DEBUG "VMware hgfs: HgfsRead: invalid dentry\n"));
       goto out;
    }
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
+   result = new_sync_read(file, buf, count, offset);
+#else
    result = generic_file_read(file, buf, count, offset);
+#endif
   out:
    return result;
 }
@@ -985,7 +982,11 @@ HgfsWrite(struct file *file,      // IN: File to write to
       goto out;
    }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
+   result = new_sync_write(file, buf, count, offset);
+#else
    result = generic_file_write(file, buf, count, offset);
+#endif
   out:
    return result;
 }

@@ -89,7 +89,8 @@
  * changed over time, so for simplicity, we'll only enable it from 2.6.19 and
  * on.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 19)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 19) && \
+         LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 # define VMW_USE_AIO
 #endif
 
