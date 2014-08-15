@@ -76,6 +76,7 @@ static int HgfsGetOpenFlags(uint32 flags);
 static int HgfsOpen(struct inode *inode,
                     struct file *file);
 #if defined VMW_USE_AIO
+#  if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 static ssize_t HgfsAioRead(struct kiocb *iocb,
                            const struct iovec *iov,
                            unsigned long numSegs,
@@ -84,6 +85,7 @@ static ssize_t HgfsAioWrite(struct kiocb *iocb,
                             const struct iovec *iov,
                             unsigned long numSegs,
                             loff_t offset);
+#  endif
 #else
 static ssize_t HgfsRead(struct file *file,
                         char __user *buf,
@@ -150,15 +152,20 @@ struct file_operations HgfsFileFileOperations = {
    .open       = HgfsOpen,
    .llseek     = HgfsSeek,
    .flush      = HgfsFlush,
-#if defined VMW_USE_AIO
+#ifdef VMW_USE_AIO
    .read       = do_sync_read,
    .write      = do_sync_write,
+#   if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
+   .read_iter = generic_file_read_iter,
+   .write_iter = generic_file_write_iter,
+#   else
    .aio_read   = HgfsAioRead,
    .aio_write  = HgfsAioWrite,
-#else
+#   endif
+#else /* !VMW_USE_AIO */
    .read       = HgfsRead,
    .write      = HgfsWrite,
-#endif
+#endif /* !VMW_USE_AIO */
    .fsync      = HgfsFsync,
    .mmap       = HgfsMmap,
    .release    = HgfsRelease,
@@ -748,6 +755,7 @@ out:
 
 
 #if defined VMW_USE_AIO
+#  if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 /*
  *----------------------------------------------------------------------
  *
@@ -883,7 +891,7 @@ out:
    return result;
 }
 
-
+#   endif /* if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0) */
 #else
 /*
  *----------------------------------------------------------------------
